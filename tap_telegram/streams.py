@@ -30,8 +30,8 @@ class GroupStream(TelegramStream):
     """Define custom stream."""
 
     name = "group"
-    primary_keys: t.ClassVar[list[str]] = ["id"]
-    replication_key = "id"
+    primary_keys: t.ClassVar[list[str]] = ["id", "date"]
+    replication_key = "date"
 
     schema = th.PropertiesList(
         th.Property("id", th.IntegerType),
