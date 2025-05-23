@@ -655,13 +655,16 @@ class StoryStream(TelegramStream):
                 )
             )  # → stories.PeerStories
             rows = []
+            link = '-'
             for item in stories.stories.stories:
+                if item.media_areas and len(item.media_areas) != 0 and item.media_areas[0].url:
+                    link = item.media_areas[0].url
                 row = {
                     "channel": CHANNEL[1:],
                     "id": item.id,
                     "created": dt.datetime.utcfromtimestamp(item.date),
                     "expire_date": dt.datetime.utcfromtimestamp(item.expire_date),
-                    "link": item.media_areas[0].url,  # первые 100 символов
+                    "link": link,  # первые 100 символов
                     "views": item.views.views_count,
                     "forwards": item.views.forwards_count,
                     "reactions": item.views.reactions_count,
