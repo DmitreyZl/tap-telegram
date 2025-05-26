@@ -57,7 +57,11 @@ class Taptelegram(Tap):
             streams.GroupStoryInteractionsStream(self),
             streams.PostsStream(self),
             streams.StoryStream(self),
-            streams.CommentsStream(self)
+            streams.CommentsStream(self),
+            streams.GroupMuteStatStream(self),
+            streams.GroupEnabledNotificationsStream(self),
+            streams.InviteLinkStream(self),
+            streams.InviteLinkUsersStream(self)
         ]
 
 

@@ -8,7 +8,6 @@ import typing as t
 from importlib import resources
 import json, sys
 import pandas as pd
-from pyrogram import Client
 from pyrogram.raw import functions, types
 from pyrogram.errors import GraphInvalidReload, MsgIdInvalid, FloodWait
 from singer_sdk.helpers.jsonpath import extract_jsonpath
@@ -17,6 +16,7 @@ import datetime as dt
 from singer_sdk import typing as th  # JSON Schema typing helpers
 
 from tap_telegram.client import TelegramStream
+from pyrogram import Client, raw
 
 # TODO: Delete this is if not using json files for schema definition
 SCHEMAS_DIR = resources.files(__package__) / "schemas"
@@ -136,6 +136,146 @@ class GroupSourcesStream(TelegramStream):
             except Exception:
                 df = pd.DataFrame()
                 yield from extract_jsonpath(self.records_jsonpath, input=df.to_dict(orient='records'))
+
+
+class GroupEnabledNotificationsStream(TelegramStream):
+    """Define custom stream."""
+    records_jsonpath = "$[*]"
+    name = "group_enabled_notifications"
+    primary_keys: t.ClassVar[list[str]] = ["date", "channel"]
+    replication_key = "date"
+
+    schema = th.PropertiesList(
+        th.Property("date", th.DateType),
+        th.Property("channel", th.StringType),
+        th.Property("part", th.IntegerType),
+        th.Property("total", th.IntegerType),
+        th.Property("pct", th.IntegerType),
+    ).to_dict()
+
+    def as_input(self, app, chat):
+        p = app.resolve_peer(chat)
+        return types.InputChannel(channel_id=p.channel_id,
+                                  access_hash=p.access_hash)
+
+    def fetch_stats(self, app, input_ch):
+        # канал → broadcast, супергруппа → megagroup
+        try:
+            return app.invoke(
+                functions.stats.GetBroadcastStats(channel=input_ch, dark=False)
+            )
+        except Exception:
+            try:
+                return app.invoke(
+                    functions.stats.GetMegagroupStats(channel=input_ch)
+                )
+            except Exception:
+                return []
+
+    def load_graph(self, app, token):
+        return app.invoke(functions.stats.LoadAsyncGraph(token=token, x=0))
+
+    def get_records(
+            self,
+            context: Context | None,
+    ) -> t.Iterable[dict]:
+        API_ID = self.config.get('api_id')  # Ваш API ID
+        API_HASH = self.config.get('api_hash')  # Ваш API Hash
+        SESSION = self.config.get('session_key')  # Сессия ПОЛЬЗОВАТЕЛЯ, АДМИНА КАНАЛА
+        CHANNEL = self.config.get('channel')
+
+        with Client(name="my_account", api_id=API_ID, api_hash=API_HASH, session_string=SESSION) as app:
+            ch = self.as_input(app, CHANNEL)
+
+            # 1️⃣ Получаем stats и token
+            stats = self.fetch_stats(app, ch)
+            try:
+                fg = stats.enabled_notifications
+                if isinstance(fg, types.StatsPercentValue):
+                    # всего две цифры – сразу считаем процент
+                    pct = fg.part * 100 / fg.total
+                    row = {
+                        "date": dt.date.today().isoformat(),
+                        "part": fg.part,
+                        "total": fg.total,
+                        "pct": pct,
+                        "channel": CHANNEL
+                    }
+                yield from extract_jsonpath(self.records_jsonpath, input=[row])
+            except Exception:
+                df = pd.DataFrame()
+                yield from extract_jsonpath(self.records_jsonpath, input=df.to_dict(orient='records'))
+
+
+class GroupMuteStatStream(TelegramStream):
+    """Define custom stream."""
+    records_jsonpath = "$[*]"
+    name = "group_mute_stat"
+    primary_keys: t.ClassVar[list[str]] = ["date", "channel"]
+    replication_key = "date"
+
+    schema = th.PropertiesList(
+        th.Property("date", th.DateType),
+        th.Property("channel", th.StringType),
+        th.Property("Muted", th.IntegerType),
+        th.Property("Unmuted", th.IntegerType),
+    ).to_dict()
+
+    def as_input(self, app, chat):
+        p = app.resolve_peer(chat)
+        return types.InputChannel(channel_id=p.channel_id,
+                                  access_hash=p.access_hash)
+
+    def fetch_stats(self, app, input_ch):
+        # канал → broadcast, супергруппа → megagroup
+        try:
+            return app.invoke(
+                functions.stats.GetBroadcastStats(channel=input_ch, dark=False)
+            )
+        except Exception:
+            try:
+                return app.invoke(
+                    functions.stats.GetMegagroupStats(channel=input_ch)
+                )
+            except Exception:
+                return []
+
+    def load_graph(self, app, token):
+        return app.invoke(functions.stats.LoadAsyncGraph(token=token, x=0))
+
+    def get_records(
+            self,
+            context: Context | None,
+    ) -> t.Iterable[dict]:
+        API_ID = self.config.get('api_id')  # Ваш API ID
+        API_HASH = self.config.get('api_hash')  # Ваш API Hash
+        SESSION = self.config.get('session_key')  # Сессия ПОЛЬЗОВАТЕЛЯ, АДМИНА КАНАЛА
+        CHANNEL = self.config.get('channel')
+
+        with Client(name="my_account", api_id=API_ID, api_hash=API_HASH, session_string=SESSION) as app:
+            ch = self.as_input(app, CHANNEL)
+
+            # 1️⃣ Получаем stats и token
+            stats = self.fetch_stats(app, ch)
+            try:
+                fg = stats.mute_graph
+                token = fg.token if isinstance(fg, types.StatsGraphAsync) else fg.zoom_token
+                if not token:
+                    sys.exit("Граф не содержит token/zoom_token")
+
+                data = json.loads(fg.json.data)
+                # print(data["names"])
+                cols = {c[0]: c[1:] for c in data["columns"]}  # 'x', 'y0', 'y1'
+                df = pd.DataFrame(cols)
+                df["x"] = pd.to_datetime(df["x"], unit="ms")
+                df["date"] = df["x"].astype(str)
+                df['channel'] = CHANNEL[1:]
+                df.rename(columns=data["names"], inplace=True)
+                yield from extract_jsonpath(self.records_jsonpath, input=df.to_dict(orient='records'))
+            except Exception:
+                df = pd.DataFrame()
+                yield from extract_jsonpath(self.records_jsonpath, input=df.to_dict(orient='records'))
+
 
 
 class GroupViewsSourcesStream(TelegramStream):
@@ -672,3 +812,217 @@ class StoryStream(TelegramStream):
                 }
                 rows.append(row)
         yield from extract_jsonpath(self.records_jsonpath, input=rows)
+
+
+class InviteLinkStream(TelegramStream):
+    """Define custom stream."""
+    records_jsonpath = "$[*]"
+    name = "invite_links"
+    primary_keys: t.ClassVar[list[str]] = ["link"]
+    replication_key = "date"
+
+    schema = th.PropertiesList(
+        th.Property("channel", th.StringType),
+        th.Property("link", th.StringType),
+        th.Property("creator_id", th.IntegerType),
+        th.Property("created", th.DateType),
+        th.Property("date", th.DateType),
+        th.Property("revoked", th.BooleanType),
+        th.Property("permanent", th.BooleanType),
+        th.Property("request_needed", th.BooleanType),
+        th.Property("joined_cnt", th.IntegerType),
+        th.Property("name", th.StringType),
+    ).to_dict()
+
+    def fetch_all_invites(self, app: Client, peer: types.InputPeerChannel):
+        invites, offset_date, offset_link = [], 0, ""
+        while True:
+            try:
+                me = app.resolve_peer("me")  # InputUserSelf
+                r = app.invoke(
+                    functions.messages.GetExportedChatInvites(
+                        peer=peer,
+                        admin_id=me,  # обязательный параметр
+                        revoked=False,
+                        offset_date=offset_date,
+                        offset_link=offset_link,
+                        limit=100
+                    )
+                )
+            except FloodWait as e:
+                print(f"⚠️ Flood-wait на {e.value} сек…")
+                time.sleep(e.value)
+                continue
+
+            invites.extend(r.invites)
+            if len(r.invites) < 100:
+                break  # получили всё
+            # пагинация: берём «хвост» предыдущего результата
+            offset_date = r.invites[-1].date
+            offset_link = r.invites[-1].link
+        return invites
+
+    def to_input_channel(self, app, chat):
+        p = app.resolve_peer(chat)
+        return types.InputChannel(channel_id=p.channel_id,
+                                  access_hash=p.access_hash)
+
+    def get_records(
+            self,
+            context: Context | None,
+    ) -> t.Iterable[dict]:
+        API_ID = self.config.get('api_id')  # Ваш API ID
+        API_HASH = self.config.get('api_hash')  # Ваш API Hash
+        SESSION = self.config.get('session_key')  # Сессия ПОЛЬЗОВАТЕЛЯ, АДМИНА КАНАЛА
+        CHANNEL = self.config.get('channel')
+
+        with Client(name="my_account", api_id=API_ID, api_hash=API_HASH, session_string=SESSION) as app:
+            peer = app.resolve_peer(CHANNEL)  # InputPeerChannel
+            invites = self.fetch_all_invites(app, peer)
+            rows = []
+            for idx, inv in enumerate(invites, 1):
+                row = {
+                    "channel": CHANNEL[1:],
+                    "link": inv.link,
+                    "creator_id": inv.admin_id,
+                    "created": dt.datetime.fromtimestamp(inv.date, tz=dt.timezone.utc),
+                    "date": dt.date.today().isoformat(),
+                    "name": inv.title,
+                    "joined_cnt": inv.usage,
+                    "revoked": inv.revoked,
+                    "permanent": inv.permanent,
+                    "request_needed": inv.request_needed
+                }
+                rows.append(row)
+        yield from extract_jsonpath(self.records_jsonpath, input=rows)
+
+
+class InviteLinkUsersStream(TelegramStream):
+    """Define custom stream."""
+    records_jsonpath = "$[*]"
+    name = "invite_link_users"
+    primary_keys: t.ClassVar[list[str]] = ["link", "user_id"]
+    replication_key = "date"
+
+    schema = th.PropertiesList(
+        th.Property("channel", th.StringType),
+        th.Property("link", th.StringType),
+        th.Property("user_id", th.IntegerType),
+        th.Property("date", th.DateType),
+        th.Property("requested", th.BooleanType),
+        th.Property("via_chatlist", th.BooleanType),
+        th.Property("name", th.StringType),
+        th.Property("first_name", th.StringType),
+        th.Property("last_name", th.StringType),
+        th.Property("username", th.StringType),
+    ).to_dict()
+
+    def fetch_invite_importers(self, app: Client, peer, link_hash: str, limit=100):
+        # первый запрос
+        r: types.messages.ChatInviteImporters = app.invoke(
+            raw.functions.messages.GetChatInviteImporters(
+                peer=peer,
+                link=link_hash,  # только hash!
+                q="",  # пустая строка = без фильтра
+                offset_date=0,
+                offset_user=raw.types.InputUserEmpty(),
+                limit=limit
+            )
+        )
+        users = r.users
+        importers = r.importers
+        while r.count > len(importers) and len(importers) != 0:
+            if len(r.importers) < limit:
+                break
+
+            # если импортёров нет вообще, дальше тоже искать нечего
+            if not r.importers:
+                break
+            last_imp = r.importers[-1]
+            offset_date = last_imp.date
+            u = next(u for u in r.users if u.id == last_imp.user_id)
+            offset_user = raw.types.InputUser(user_id=u.id, access_hash=u.access_hash)
+            r: types.messages.ChatInviteImporters = app.invoke(
+                raw.functions.messages.GetChatInviteImporters(
+                    peer=peer,
+                    link=link_hash,  # только hash!
+                    q="",  # пустая строка = без фильтра
+                    offset_date=offset_date,
+                    offset_user=offset_user,
+                    limit=limit
+                )
+            )
+            users.extend(r.users)
+            importers.extend(r.importers)
+
+        return importers, users
+
+    def fetch_all_invites(self, app: Client, peer: types.InputPeerChannel):
+        invites, offset_date, offset_link = [], 0, ""
+        while True:
+            try:
+                me = app.resolve_peer("me")  # InputUserSelf
+                r = app.invoke(
+                    functions.messages.GetExportedChatInvites(
+                        peer=peer,
+                        admin_id=me,  # обязательный параметр
+                        revoked=False,
+                        offset_date=offset_date,
+                        offset_link=offset_link,
+                        limit=100
+                    )
+                )
+            except FloodWait as e:
+                print(f"⚠️ Flood-wait на {e.value} сек…")
+                time.sleep(e.value)
+                continue
+
+            invites.extend(r.invites)
+            if len(r.invites) < 100:
+                break  # получили всё
+            # пагинация: берём «хвост» предыдущего результата
+            offset_date = r.invites[-1].date
+            offset_link = r.invites[-1].link
+        return invites
+
+    def to_input_channel(self, app, chat):
+        p = app.resolve_peer(chat)
+        return types.InputChannel(channel_id=p.channel_id,
+                                  access_hash=p.access_hash)
+
+    def get_records(
+            self,
+            context: Context | None,
+    ) -> t.Iterable[dict]:
+        API_ID = self.config.get('api_id')  # Ваш API ID
+        API_HASH = self.config.get('api_hash')  # Ваш API Hash
+        SESSION = self.config.get('session_key')  # Сессия ПОЛЬЗОВАТЕЛЯ, АДМИНА КАНАЛА
+        CHANNEL = self.config.get('channel')
+
+        with Client(name="my_account", api_id=API_ID, api_hash=API_HASH, session_string=SESSION) as app:
+            peer = app.resolve_peer(CHANNEL)  # InputPeerChannel
+            invites = self.fetch_all_invites(app, peer)
+            rows = []
+            for idx, inv in enumerate(invites, 1):
+                importers, users = self.fetch_invite_importers(app, peer, inv.link)
+                for imp in importers:
+                    user = {}
+                    for u in users:
+                        if u.id == imp.user_id:
+                            user = u
+                            break
+                    row = {
+                        "channel": CHANNEL[1:],
+                        "link": inv.link,
+                        "user_id": imp.user_id,
+                        "date": dt.datetime.fromtimestamp(imp.date, tz=dt.timezone.utc),
+                        "name": inv.title,
+                        "requested": imp.requested,
+                        "via_chatlist": imp.via_chatlist,
+                        "first_name": user.first_name if user.first_name and user.first_name else '-',
+                        "last_name": user.last_name if user.last_name and user.last_name else '-',
+                        "username": user.username if user.username and user.username else '-'
+                    }
+                    rows.append(row)
+        yield from extract_jsonpath(self.records_jsonpath, input=rows)
+
