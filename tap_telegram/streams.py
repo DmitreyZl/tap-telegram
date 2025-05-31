@@ -277,7 +277,6 @@ class GroupMuteStatStream(TelegramStream):
                 yield from extract_jsonpath(self.records_jsonpath, input=df.to_dict(orient='records'))
 
 
-
 class GroupViewsSourcesStream(TelegramStream):
     """Define custom stream."""
     records_jsonpath = "$[*]"
@@ -461,6 +460,76 @@ class GroupLanguagesStream(TelegramStream):
                 df['channel'] = CHANNEL[1:]
                 df.rename(columns=data["names"], inplace=True)
                 df.rename(columns={'x': 'date'}, inplace=True)
+                yield from extract_jsonpath(self.records_jsonpath, input=df.to_dict(orient='records'))
+            except Exception:
+                df = pd.DataFrame()
+                yield from extract_jsonpath(self.records_jsonpath, input=df.to_dict(orient='records'))
+
+
+class GroupFollowersStream(TelegramStream):
+    """Define custom stream."""
+    records_jsonpath = "$[*]"
+    name = "group_followers_stat"
+    primary_keys: t.ClassVar[list[str]] = ["date", "channel"]
+    replication_key = "date"
+
+    schema = th.PropertiesList(
+        th.Property("date", th.DateType),
+        th.Property("channel", th.StringType),
+        th.Property("Joined", th.IntegerType),
+        th.Property("Left", th.IntegerType)
+    ).to_dict()
+
+    def as_input(self, app, chat):
+        p = app.resolve_peer(chat)
+        return types.InputChannel(channel_id=p.channel_id,
+                                  access_hash=p.access_hash)
+
+    def fetch_stats(self, app, input_ch):
+        # канал → broadcast, супергруппа → megagroup
+        try:
+            return app.invoke(
+                functions.stats.GetBroadcastStats(channel=input_ch, dark=False)
+            )
+        except Exception:
+            try:
+                return app.invoke(
+                    functions.stats.GetMegagroupStats(channel=input_ch)
+                )
+            except Exception:
+                return []
+
+    def load_graph(self, app, token):
+        return app.invoke(functions.stats.LoadAsyncGraph(token=token, x=0))
+
+    def get_records(
+            self,
+            context: Context | None,
+    ) -> t.Iterable[dict]:
+        API_ID = self.config.get('api_id')  # Ваш API ID
+        API_HASH = self.config.get('api_hash')  # Ваш API Hash
+        SESSION = self.config.get('session_key')  # Сессия ПОЛЬЗОВАТЕЛЯ, АДМИНА КАНАЛА
+        CHANNEL = self.config.get('channel')
+
+        with Client(name="my_account", api_id=API_ID, api_hash=API_HASH, session_string=SESSION) as app:
+            ch = self.as_input(app, CHANNEL)
+
+            # 1️⃣ Получаем stats и token
+            stats = self.fetch_stats(app, ch)
+            try:
+                fg = stats.followers_graph
+
+                # 3️⃣ JSON → DataFrame  ➜ берём ровно один день
+                data = json.loads(fg.json.data)
+                # print(data["names"])
+                cols = {c[0]: c[1:] for c in data["columns"]}  # 'x', 'y0', 'y1'
+                df = pd.DataFrame(cols)
+                df["x"] = pd.to_datetime(df["x"], unit="ms")
+                df["x"] = df["x"].astype(str)
+                df['channel'] = CHANNEL[1:]
+                df.rename(columns=data["names"], inplace=True)
+                df.rename(columns={'x': 'date'}, inplace=True)
+
                 yield from extract_jsonpath(self.records_jsonpath, input=df.to_dict(orient='records'))
             except Exception:
                 df = pd.DataFrame()
@@ -732,10 +801,10 @@ class CommentsStream(TelegramStream):
                     # это уже чья-то реплика, а не корневой пост
                     continue
                 try:
-                    comments = list(app.get_discussion_replies(post.chat.id, post.id))# ← главное изменение
+                    comments = list(app.get_discussion_replies(post.chat.id, post.id))  # ← главное изменение
                 except FloodWait as fw:
                     time.sleep(fw.value + 1)
-                    comments = list(app.get_discussion_replies(post.chat.id, post.id)) # повторяем тот же запрос
+                    comments = list(app.get_discussion_replies(post.chat.id, post.id))  # повторяем тот же запрос
                 except MsgIdInvalid:
                     # нет треда – пропускаем, чтобы не обрушить sync-цикл
                     continue
@@ -1026,3 +1095,89 @@ class InviteLinkUsersStream(TelegramStream):
                     rows.append(row)
         yield from extract_jsonpath(self.records_jsonpath, input=rows)
 
+
+class EventsLogStream(TelegramStream):
+    """Define custom stream."""
+    records_jsonpath = "$[*]"
+    name = "events_groups_log"
+    primary_keys: t.ClassVar[list[str]] = ["event_id"]
+    replication_key = "date"
+
+    schema = th.PropertiesList(
+        th.Property("channel", th.StringType),
+        th.Property("event_id", th.StringType),
+        th.Property("user_id", th.IntegerType),
+        th.Property("date", th.DateType),
+        th.Property("event_type", th.StringType),
+        th.Property("invite_link", th.StringType),
+        th.Property("invite_link_title", th.StringType),
+        th.Property("invite_admin_id", th.StringType),
+    ).to_dict()
+
+    def get_records(
+            self,
+            context: Context | None,
+    ) -> t.Iterable[dict]:
+        API_ID = self.config.get('api_id')  # Ваш API ID
+        API_HASH = self.config.get('api_hash')  # Ваш API Hash
+        SESSION = self.config.get('session_key')  # Сессия ПОЛЬЗОВАТЕЛЯ, АДМИНА КАНАЛА
+        CHANNEL = self.config.get('channel')
+
+        with Client(name="my_account", api_id=API_ID, api_hash=API_HASH, session_string=SESSION) as app:
+            peer = app.resolve_peer(CHANNEL)  # InputPeerChannel
+            # --- 1. резолвим peer в InputPeer ---
+
+            ev_filter = types.ChannelAdminLogEventsFilter(
+                join=True,
+                leave=True,
+                invite=True,
+                ban=True,
+                unban=True,
+                kick=True,
+                unkick=True
+            )
+            max_id = 0
+            record = []
+            while True:
+                result = app.invoke(
+                    functions.channels.GetAdminLog(
+                        channel=peer,
+                        q="",  # поиск по строке, '' = всё
+                        events_filter=ev_filter,
+                        max_id=max_id,  # диапазон msg_id, 0 = без ограничений
+                        min_id=0,
+                        limit=100  # сколько записей вернуть
+                    )
+                )
+                if not result.events:
+                    break
+                for ev in result.events:
+                    link = None
+                    title = None
+                    admin_id = None
+                    if isinstance(ev.action, types.ChannelAdminLogEventActionParticipantJoinByInvite):
+                        type_event = 'join_by_invite'
+                        if ev.action.invite and ev.action.invite.link:
+                            link = ev.action.invite.link
+                        if ev.action.invite and ev.action.invite.title:
+                            title = ev.action.invite.title
+                        if ev.action.invite and ev.action.invite.admin_id:
+                            admin_id = ev.action.invite.admin_id
+                    if isinstance(ev.action, types.ChannelAdminLogEventActionParticipantLeave):
+                        type_event = 'leave'
+                    if isinstance(ev.action, types.ChannelAdminLogEventActionParticipantJoin):
+                        type_event = 'join'
+                    if isinstance(ev.action, types.ChannelAdminLogEventActionParticipantInvite):
+                        type_event = 'invite'
+                    record.append({
+                        "channel": CHANNEL[1:],
+                        "event_id": ev.id,
+                        "event_type": type_event,
+                        "user_id": ev.user_id,
+                        "date": dt.datetime.fromtimestamp(ev.date, tz=dt.timezone.utc),
+                        "invite_link": link,
+                        "invite_link_title": title,
+                        "invite_admin_id": admin_id
+                    })
+                max_id = result.events[-1].id
+        yield from extract_jsonpath(self.records_jsonpath, input=record)
