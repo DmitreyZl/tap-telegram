@@ -536,6 +536,75 @@ class GroupFollowersStream(TelegramStream):
                 yield from extract_jsonpath(self.records_jsonpath, input=df.to_dict(orient='records'))
 
 
+class GroupFollowersTotalStream(TelegramStream):
+    """Define custom stream."""
+    records_jsonpath = "$[*]"
+    name = "group_followers_total_stat"
+    primary_keys: t.ClassVar[list[str]] = ["date", "channel"]
+    replication_key = "date"
+
+    schema = th.PropertiesList(
+        th.Property("date", th.DateType),
+        th.Property("channel", th.StringType),
+        th.Property("Total", th.IntegerType),
+    ).to_dict()
+
+    def as_input(self, app, chat):
+        p = app.resolve_peer(chat)
+        return types.InputChannel(channel_id=p.channel_id,
+                                  access_hash=p.access_hash)
+
+    def fetch_stats(self, app, input_ch):
+        # канал → broadcast, супергруппа → megagroup
+        try:
+            return app.invoke(
+                functions.stats.GetBroadcastStats(channel=input_ch, dark=False)
+            )
+        except Exception:
+            try:
+                return app.invoke(
+                    functions.stats.GetMegagroupStats(channel=input_ch)
+                )
+            except Exception:
+                return []
+
+    def load_graph(self, app, token):
+        return app.invoke(functions.stats.LoadAsyncGraph(token=token, x=0))
+
+    def get_records(
+            self,
+            context: Context | None,
+    ) -> t.Iterable[dict]:
+        API_ID = self.config.get('api_id')  # Ваш API ID
+        API_HASH = self.config.get('api_hash')  # Ваш API Hash
+        SESSION = self.config.get('session_key')  # Сессия ПОЛЬЗОВАТЕЛЯ, АДМИНА КАНАЛА
+        CHANNEL = self.config.get('channel')
+
+        with Client(name="my_account", api_id=API_ID, api_hash=API_HASH, session_string=SESSION) as app:
+            ch = self.as_input(app, CHANNEL)
+
+            # 1️⃣ Получаем stats и token
+            stats = self.fetch_stats(app, ch)
+            try:
+                fg = stats.growth_graph
+
+                # 3️⃣ JSON → DataFrame  ➜ берём ровно один день
+                data = json.loads(fg.json.data)
+                # print(data["names"])
+                cols = {c[0]: c[1:] for c in data["columns"]}  # 'x', 'y0', 'y1'
+                df = pd.DataFrame(cols)
+                df["x"] = pd.to_datetime(df["x"], unit="ms")
+                df["x"] = df["x"].astype(str)
+                df['channel'] = CHANNEL[1:]
+                df.rename(columns={'y0': 'Total'}, inplace=True)
+                df.rename(columns={'x': 'date'}, inplace=True)
+
+                yield from extract_jsonpath(self.records_jsonpath, input=df.to_dict(orient='records'))
+            except Exception:
+                df = pd.DataFrame()
+                yield from extract_jsonpath(self.records_jsonpath, input=df.to_dict(orient='records'))
+
+
 class GroupInteractionsStream(TelegramStream):
     """Define custom stream."""
     records_jsonpath = "$[*]"

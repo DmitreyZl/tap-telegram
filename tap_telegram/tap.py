@@ -63,7 +63,8 @@ class Taptelegram(Tap):
             streams.InviteLinkStream(self),
             streams.InviteLinkUsersStream(self),
             streams.GroupFollowersStream(self),
-            streams.EventsLogStream(self)
+            streams.EventsLogStream(self),
+            streams.GroupFollowersTotalStream(self)
         ]
 
 
