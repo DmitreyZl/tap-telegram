@@ -130,7 +130,7 @@ class GroupSourcesStream(TelegramStream):
                 df.rename(columns=data["names"], inplace=True)
                 df.rename(columns={'x': 'date', 'Ads': 'ads', 'URL': 'link', 'Similar Channels': 'similar_channels',
                                    'Shareable Chat Folders': 'shareable_chat', 'PM': 'pm', 'Search': 'search',
-                                   'Groups': 'groups'}, inplace=True)
+                                   'Groups': 'groups', 'Channels': 'channels'}, inplace=True)
 
                 yield from extract_jsonpath(self.records_jsonpath, input=df.to_dict(orient='records'))
             except Exception:
