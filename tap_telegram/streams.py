@@ -61,6 +61,7 @@ class GroupSourcesStream(TelegramStream):
         th.Property("pm", th.IntegerType),
         th.Property("search", th.IntegerType),
         th.Property("groups", th.IntegerType),
+        th.Property("channels", th.IntegerType),
     ).to_dict()
 
     def as_input(self, app, chat):
